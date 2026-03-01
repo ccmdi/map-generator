@@ -14,7 +14,7 @@ type Tile = {
 }
 
 const TILE_SIZE = 256
-const MAX_TILES = 5
+const MAX_TILES = 50
 const TILE_CACHE: Record<string, HTMLImageElement> = {}
 
 const LAYERS: Record<LayerType, (x: number, y: number, z: number) => string> = {
@@ -180,6 +180,85 @@ function distanceFromPointInMeters(lat1: number, lng1: number, bearing: number, 
 
   if (isNaN(lat2) || isNaN(lng2)) return null
   return { lat: toDeg(lat2), lng: toDeg(lng2) }
+}
+
+function canvasToLatLng(
+  tileNW: { x: number; y: number },
+  px: number,
+  py: number,
+  zoom: number,
+): LatLng {
+  const scale = 1 << zoom
+  const worldX = (tileNW.x * TILE_SIZE + px) / scale
+  const worldY = (tileNW.y * TILE_SIZE + py) / scale
+  const lng = (worldX / TILE_SIZE - 0.5) * 360
+  const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * worldY) / TILE_SIZE)))
+  const lat = (latRad * 180) / Math.PI
+  return { lat, lng }
+}
+
+export async function blueLineSampler(boundNW: LatLng, boundSE: LatLng) {
+  const ctx = document.createElement('canvas').getContext('2d')
+  if (!ctx) throw new Error('Failed to obtain 2D rendering context')
+
+  const { zoom, cols, rows, tileCoordNW } = calculateZoom(boundNW, boundSE, MAX_TILES)
+  console.log(`[blueLineSampler] zoom=${zoom}, tiles=${cols}x${rows} (${cols * rows} total)`)
+
+  ctx.canvas.width = TILE_SIZE
+  ctx.canvas.height = TILE_SIZE
+
+  const tileSpan = 1 << zoom
+
+  const tilePromises: { tx: number; ty: number; promise: Promise<Tile> }[] = []
+  for (let ty = 0; ty < rows; ty++) {
+    for (let tx = 0; tx < cols; tx++) {
+      const tileX = (tileCoordNW.x + tx) % tileSpan
+      const tileY = (tileCoordNW.y + ty) % tileSpan
+      tilePromises.push({ tx, ty, promise: loadTile(tileX, tileY, zoom, 'thin') })
+    }
+  }
+
+  const tiles = await Promise.allSettled(tilePromises.map((t) => t.promise))
+
+  const pixelPositions: number[] = []
+
+  for (let i = 0; i < tiles.length; i++) {
+    const result = tiles[i]
+    if (result.status !== 'fulfilled') continue
+
+    const { tx, ty } = tilePromises[i]
+    ctx.clearRect(0, 0, TILE_SIZE, TILE_SIZE)
+    ctx.drawImage(result.value.img, 0, 0)
+
+    const imageData = ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE)
+    const data = imageData.data
+
+    for (let py = 0; py < TILE_SIZE; py++) {
+      for (let px = 0; px < TILE_SIZE; px++) {
+        if (data[(py * TILE_SIZE + px) * 4 + 3] > 0) {
+          const globalX = (tileCoordNW.x + tx) * TILE_SIZE + px
+          const globalY = (tileCoordNW.y + ty) * TILE_SIZE + py
+          pixelPositions.push(globalX, globalY)
+        }
+      }
+    }
+  }
+
+  const count = pixelPositions.length / 2
+  console.log(`[blueLineSampler] ${count} coverage pixels found`)
+
+  const scale = 1 << zoom
+
+  return function (): LatLng | null {
+    if (count === 0) return null
+    const i = Math.floor(Math.random() * count) * 2
+    const worldX = (pixelPositions[i] + Math.random()) / scale
+    const worldY = (pixelPositions[i + 1] + Math.random()) / scale
+    const lng = (worldX / TILE_SIZE - 0.5) * 360
+    const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * worldY) / TILE_SIZE)))
+    const lat = (latRad * 180) / Math.PI
+    return { lat, lng }
+  }
 }
 
 export async function blueLineDetector(boundNW: LatLng, boundSE: LatLng) {

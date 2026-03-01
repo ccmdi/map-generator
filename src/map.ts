@@ -2,18 +2,9 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import '@/assets/leaflet-draw/leaflet.draw.js' // npm one is broken for rectangles so we use a patched one
 import '@/assets/leaflet-draw/leaflet.draw.css'
-import 'leaflet.markercluster'
-import 'leaflet.markercluster.freezable/dist/leaflet.markercluster.freezable.js'
-import 'leaflet.markercluster/dist/MarkerCluster.css'
-import 'leaflet.markercluster/dist/MarkerCluster.Default.css'
 import 'leaflet-contextmenu'
 import 'leaflet-contextmenu/dist/leaflet.contextmenu.css'
 
-import markerBlue from '@/assets/markers/marker-blue.png'
-import markerRed from '@/assets/markers/marker-red.png'
-import markerViolet from '@/assets/markers/marker-violet.png'
-import markerGreen from '@/assets/markers/marker-green.png'
-import markerPink from '@/assets/markers/marker-pink.png'
 
 import { ref } from 'vue'
 import { useStorage } from '@vueuse/core'
@@ -357,12 +348,12 @@ for (const [name, layer] of Object.entries(overlayMaps)) {
 }
 
 type MarkerLayersTypes = 'gen4' | 'gen2Or3' | 'gen1' | 'newRoad' | 'noBlueLine'
-const markerLayers: Record<MarkerLayersTypes, L.MarkerClusterGroup> = {
-  gen4: L.markerClusterGroup({ maxClusterRadius: 100, disableClusteringAtZoom: 15 }),
-  gen2Or3: L.markerClusterGroup({ maxClusterRadius: 100, disableClusteringAtZoom: 15 }),
-  gen1: L.markerClusterGroup({ maxClusterRadius: 100, disableClusteringAtZoom: 15 }),
-  newRoad: L.markerClusterGroup({ maxClusterRadius: 100, disableClusteringAtZoom: 15 }),
-  noBlueLine: L.markerClusterGroup({ maxClusterRadius: 100, disableClusteringAtZoom: 15 }),
+const markerLayers: Record<MarkerLayersTypes, L.LayerGroup> = {
+  gen4: L.layerGroup(),
+  gen2Or3: L.layerGroup(),
+  gen1: L.layerGroup(),
+  newRoad: L.layerGroup(),
+  noBlueLine: L.layerGroup(),
 }
 
 export interface LayerMeta {
@@ -509,24 +500,15 @@ function updateMarkerLayers(gen: MarkerLayersTypes) {
     (gen === 'noBlueLine' && settings.markers.noBlueLine)
   ) {
     map.addLayer(markerLayers[gen])
-    if (!settings.markers.cluster) markerLayers[gen].disableClustering()
-    else markerLayers[gen].enableClustering()
   } else {
     map.removeLayer(markerLayers[gen])
   }
 }
 
-function updateClusters() {
-  Object.values(markerLayers).forEach((markerLayer) => {
-    if (settings.markers.cluster) markerLayer.enableClustering()
-    else markerLayer.disableClustering()
-  })
-}
-
 function clearPolygon(polygon: Polygon) {
   Object.values(markerLayers).forEach((markerLayer) => {
     const toRemove = markerLayer.getLayers().filter((layer) => {
-      const marker = layer as L.Marker
+      const marker = layer as L.CircleMarker
       return marker.polygonID === polygon._leaflet_id
     })
     toRemove.forEach((marker) => {
@@ -596,12 +578,12 @@ function getRandomColor() {
   return 'rgb(' + red + ', ' + green + ', ' + blue + ')'
 }
 
-const icons = {
-  gen1: L.icon({ iconUrl: markerGreen, iconAnchor: [12, 41] }),
-  gen2Or3: L.icon({ iconUrl: markerViolet, iconAnchor: [12, 41] }),
-  gen4: L.icon({ iconUrl: markerBlue, iconAnchor: [12, 41] }),
-  newLoc: L.icon({ iconUrl: markerRed, iconAnchor: [12, 41] }),
-  noBlueLine: L.icon({ iconUrl: markerPink, iconAnchor: [12, 41] }),
+const markerColors = {
+  gen1: '#24AC20',
+  gen2Or3: '#9A28CA',
+  gen4: '#4a90d9',
+  newLoc: '#e74c3c',
+  noBlueLine: '#e91e8f',
 }
 
 export {
@@ -616,8 +598,7 @@ export {
   updateMarkerLayers,
   availableLayers,
   markerLayers,
-  updateClusters,
   clearMarkers,
   currentZoom,
-  icons,
+  markerColors,
 }

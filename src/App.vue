@@ -249,6 +249,15 @@
             Only check in areas with blue lines
           </Checkbox>
 
+          <Checkbox
+            v-if="settings.onlyCheckBlueLines"
+            v-model="settings.useBlueLineSampler"
+            class="ml-6"
+            title="Generate points directly on blue line pixels instead of random sampling + filtering. Much faster but may miss roads not visible at the tile zoom level."
+          >
+            Sample from blue lines (faster)
+          </Checkbox>
+
           <div v-if="!settings.rejectOfficial">
             <Checkbox v-model="settings.findRegions">Minimum distance between locations</Checkbox>
             <div v-if="settings.findRegions" class="ml-6">
@@ -685,13 +694,6 @@
             v-on:change="updateMarkerLayers('gen1')">
             <span class="h-3 w-3 bg-[#24AC20] rounded-full"></span>Gen 1 Update
           </Checkbox>
-          <Checkbox
-            v-model="settings.markers.cluster"
-            v-on:change="updateClusters"
-            title="For lag reduction."
-          >
-            Cluster markers
-          </Checkbox>
           <Button
             :disabled="!totalLocs"
             size="sm"
@@ -705,20 +707,25 @@
         </Collapsible>
       </div>
 
-      <Button
-        v-if="canBeStarted"
-        @click="handleClickStart"
-        :variant="state.started ? 'danger' : 'primary'"
-        title="Space bar/Enter"
-        >{{ state.started ? 'Pause' : 'Start' }}
-      </Button>
+      <div class="flex items-center gap-3">
+        <Button
+          v-if="canBeStarted"
+          @click="handleClickStart"
+          :variant="state.started ? 'danger' : 'primary'"
+          title="Space bar/Enter"
+          >{{ state.started ? 'Pause' : 'Start' }}
+        </Button>
+        <span v-if="state.started && locsPerMin > 0" class="text-sm text-gray-300 bg-gray-800 px-2 py-0.5 rounded">
+          {{ locsPerMin }} locs/min | {{ hitRate }}% hit
+        </span>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 // @ts-nocheck
-import { onMounted, watch, computed } from 'vue'
+import { onMounted, onUnmounted, watch, computed, ref } from 'vue'
 import { useStorage, useColorMode } from '@vueuse/core'
 import booleanPointInPolygon from '@turf/boolean-point-in-polygon'
 import { llToPX } from 'web-merc-projection'
@@ -754,14 +761,14 @@ import {
   updateMarkerLayers,
   availableLayers,
   markerLayers,
-  updateClusters,
   clearMarkers,
   currentZoom,
-  icons,
+  markerColors,
   type LayerMeta,
 } from '@/map'
 
-import { blueLineDetector } from '@/composables/blueLineDetector'
+import { blueLineDetector, blueLineSampler } from '@/composables/blueLineDetector'
+import { Semaphore } from '@/composables/semaphore'
 import { getTileUrl, getTileColorPresence } from '@/composables/tileColorDetector'
 import {
   sendNotification,
@@ -834,10 +841,51 @@ const totalLocs = computed(() =>
   selected.value.reduce((sum, country) => sum + country.found.length, 0),
 )
 
+const locsPerMin = ref(0)
+const hitRate = ref(0)
+let _genStartTime = 0
+let _genStartLocs = 0
+let _apiCalls = 0
+let _apiHits = 0
+let _locsPerMinInterval: ReturnType<typeof setInterval> | null = null
+
+function _trackApiCall() { _apiCalls++ }
+function _trackApiHit() { _apiHits++ }
+
+function _startLocsPerMin() {
+  _genStartTime = Date.now()
+  _genStartLocs = totalLocs.value
+  _apiCalls = 0
+  _apiHits = 0
+  locsPerMin.value = 0
+  hitRate.value = 0
+  _locsPerMinInterval = setInterval(() => {
+    const elapsedMin = (Date.now() - _genStartTime) / 60_000
+    if (elapsedMin < 0.05) return
+    locsPerMin.value = Math.round((totalLocs.value - _genStartLocs) / elapsedMin * 10) / 10
+    hitRate.value = _apiCalls > 0 ? Math.round((_apiHits / _apiCalls) * 100) : 0
+  }, 1000)
+}
+
+function _stopLocsPerMin() {
+  if (_locsPerMinInterval) {
+    clearInterval(_locsPerMinInterval)
+    _locsPerMinInterval = null
+  }
+}
+
+watch(() => state.started, (started) => {
+  if (started) _startLocsPerMin()
+  else _stopLocsPerMin()
+})
+
+onUnmounted(_stopLocsPerMin)
+
+
 function clearPolygon(polygon: Polygon) {
   Object.values(markerLayers).forEach((markerLayer) => {
     const toRemove = markerLayer.getLayers().filter((layer) => {
-      const marker = layer as L.Marker
+      const marker = layer as L.CircleMarker
       return marker.polygonID === polygon._leaflet_id
     })
     toRemove.forEach((marker) => {
@@ -889,35 +937,56 @@ async function start() {
 }
 
 async function generate(polygon: Polygon) {
-  let detector
+  const bounds = polygon.getBounds()
+  const boundsNW = { lat: bounds.getNorth(), lng: bounds.getWest() }
+  const boundsSE = { lat: bounds.getSouth(), lng: bounds.getEast() }
+
+  let detector: ((lat: number, lng: number, radius: number) => boolean) | null = null
+  let sampler: (() => LatLng | null) | null = null
 
   if (settings.onlyCheckBlueLines) {
-    const bounds = polygon.getBounds()
-    const boundsNW = { lat: bounds.getNorth(), lng: bounds.getWest() }
-    const boundsSE = { lat: bounds.getSouth(), lng: bounds.getEast() }
+    if (settings.useBlueLineSampler) {
+      sampler = await blueLineSampler(boundsNW, boundsSE)
+    }
     detector = await blueLineDetector(boundsNW, boundsSE)
   }
 
   while (polygon.found.length < polygon.nbNeeded) {
     if (!state.started) return
+
     polygon.isProcessing = true
 
-    const randomCoords = []
+    const randomCoords: LatLng[] = []
     const n = Math.min(polygon.nbNeeded * 100, settings.speed)
 
     while (randomCoords.length < n) {
-      const point = randomPointInPoly(polygon)
-      if (
-        booleanPointInPolygon([point.lng, point.lat], polygon.feature) &&
-        (!settings.onlyCheckBlueLines || detector(point.lat, point.lng, settings.radius))
-      ) {
-        randomCoords.push(point)
+      let point: LatLng
+
+      if (sampler) {
+        const p = sampler()
+        if (!p) break
+        point = p
+      } else {
+        point = randomPointInPoly(polygon)
       }
+
+      if (!booleanPointInPolygon([point.lng, point.lat], polygon.feature)) continue
+      if (!sampler && detector && !detector(point.lat, point.lng, settings.radius)) continue
+
+      randomCoords.push(point)
     }
 
-    const chunkSize = settings.findRegions ? 1 : 75
-    for (const locationGroup of randomCoords.chunk(chunkSize)) {
-      await Promise.allSettled(locationGroup.map((l) => getLoc(l, polygon)))
+    if (sampler && randomCoords.length === 0) break
+
+    if (settings.findRegions) {
+      for (const loc of randomCoords) {
+        await getLoc(loc, polygon)
+      }
+    } else {
+      const semaphore = new Semaphore(75)
+      await Promise.allSettled(
+        randomCoords.map((l) => semaphore.run(() => getLoc(l, polygon))),
+      )
     }
   }
   polygon.isProcessing = false
@@ -977,6 +1046,7 @@ async function getNonBadcamRes(pano: string): Promise<StreetViewPanoramaData | n
 }
 
 async function getLoc(loc: LatLng, polygon: Polygon) {
+  _trackApiCall()
   return StreetViewProviders.getPanorama(settings.provider, getPanoramaRequest(loc, settings.rejectUnofficial), async (res, status) => {
     if (status != google.maps.StreetViewStatus.OK || !res || !res.location) return false
 
@@ -1349,6 +1419,7 @@ function getPanoDeep(id: string, polygon: Polygon, depth: number) {
 }
 
 function addLoc(pano: google.maps.StreetViewPanoramaData, polygon: Polygon) {
+  _trackApiHit()
   let heading = 0
   if (settings.heading.adjust) {
     if (settings.heading.reference === 'forward') {
@@ -1409,20 +1480,20 @@ function addLoc(pano: google.maps.StreetViewPanoramaData, polygon: Polygon) {
   if (!previousPano) {
     checkHasBlueLine(pano.location.latLng.toJSON()).then((hasBlueLine) => {
       addLocation(location, polygon,
-        settings.provider != 'google' ? icons.newLoc : (hasBlueLine ? icons.newLoc : icons.noBlueLine))
+        settings.provider != 'google' ? markerColors.newLoc : (hasBlueLine ? markerColors.newLoc : markerColors.noBlueLine))
     })
   } else {
     StreetViewProviders.getPanorama(settings.provider, { pano: previousPano }, (previousPano) => {
-      if (settings.provider != 'google') return addLocation(location, polygon, icons.gen4)
+      if (settings.provider != 'google') return addLocation(location, polygon, markerColors.gen4)
       if (previousPano?.tiles?.worldSize.height === 1664) {
         // Gen 1
-        return addLocation(location, polygon, icons.gen1)
+        return addLocation(location, polygon, markerColors.gen1)
       } else if (previousPano?.tiles?.worldSize.height === 6656) {
         // Gen 2 or 3
-        return addLocation(location, polygon, icons.gen2Or3)
+        return addLocation(location, polygon, markerColors.gen2Or3)
       } else {
         // Gen 4
-        return addLocation(location, polygon, icons.gen4)
+        return addLocation(location, polygon, markerColors.gen4)
       }
     })
   }
@@ -1431,30 +1502,25 @@ function addLoc(pano: google.maps.StreetViewPanoramaData, polygon: Polygon) {
 function addLocation(
   location: Panorama,
   polygon: Polygon,
-  iconType: L.Icon,
+  color: string,
   addMarker: boolean = true,
 ) {
   if (allFoundPanoIds.has(location.panoId)) return
   allFoundPanoIds.add(location.panoId)
 
   let markerLayer = markerLayers['gen4']
-  let zIndex = 1
-  switch (iconType) {
-    case icons.gen2Or3:
+  switch (color) {
+    case markerColors.gen2Or3:
       markerLayer = markerLayers['gen2Or3']
-      zIndex = 2
       break
-    case icons.gen1:
+    case markerColors.gen1:
       markerLayer = markerLayers['gen1']
-      zIndex = 3
       break
-    case icons.newLoc:
+    case markerColors.newLoc:
       markerLayer = markerLayers['newRoad']
-      zIndex = 4
       break
-    case icons.noBlueLine:
+    case markerColors.noBlueLine:
       markerLayer = markerLayers['noBlueLine']
-      zIndex = 5
       break
   }
 
@@ -1480,7 +1546,13 @@ function addLocation(
       }
     }
     if (addMarker) {
-      const marker = L.marker([location.lat, location.lng], { icon: iconType, forceZIndex: zIndex })
+      const marker = L.circleMarker([location.lat, location.lng], {
+        radius: 5,
+        color,
+        fillColor: color,
+        fillOpacity: 1,
+        weight: 1,
+      })
         .on('click', () => {
           const heading = location.heading ?? 0
           const pitch = location.pitch ?? 0
@@ -1515,9 +1587,8 @@ function addLocation(
 
           window.open(url, '_blank')
         })
-        .setZIndexOffset(zIndex)
         .addTo(markerLayer)
-      marker.polygonID = polygon._leaflet_id
+      ;(marker as any).polygonID = polygon._leaflet_id
     }
   }
 }
@@ -1575,7 +1646,7 @@ async function importLocations(e: Event, polygon: Polygon) {
               getPano(link, polygon)
           }
         }
-        addLocation(location, polygon, icons.gen4, settings.markersOnImport)
+        addLocation(location, polygon, markerColors.gen4, settings.markersOnImport)
       }
     } else {
       alert('Unknown file type: ' + file.type + '. Only JSON may be imported.')
@@ -1613,26 +1684,6 @@ window.onbeforeunload = function () {
     return 'Are you sure you want to stop the generator ?'
   }
 }
-
-// window.type = !0
-// not sure if really needed
-;(function (global: typeof L.Marker | undefined) {
-  const MarkerMixin = {
-    _updateZIndex: function (offset: number) {
-      // @ts-expect-error error
-      this._icon.style.zIndex = this.options.forceZIndex
-        ? // @ts-expect-error error
-          this.options.forceZIndex + (this.options.zIndexOffset || 0)
-        : // @ts-expect-error error
-          this._zIndex + offset
-    },
-    setForceZIndex: function (forceZIndex?: number | null) {
-      // @ts-expect-error error
-      this.options.forceZIndex = forceZIndex ? forceZIndex : null
-    },
-  }
-  if (global) global.include(MarkerMixin)
-})(L.Marker)
 
 Array.prototype.chunk = function (n) {
   if (!this.length) {

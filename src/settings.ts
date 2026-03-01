@@ -17,6 +17,7 @@ const defaultSettings = {
   radius: 500,
   oneCountryAtATime: false,
   onlyCheckBlueLines: false,
+  useBlueLineSampler: true,
   findRegions: false,
   regionRadius: 100,
 
@@ -335,7 +336,6 @@ const defaultSettings = {
     gen4: true,
     newRoad: true,
     noBlueLine: true,
-    cluster: false,
   },
   markersOnImport: true,
   checkImports: false,
