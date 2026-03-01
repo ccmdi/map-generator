@@ -185,6 +185,27 @@
         </div>
       </div>
     </div>
+
+    <div v-if="state.started && loadingTiles" class="container">
+      <div class="flex items-center gap-2 p-1 text-sm text-gray-300">
+        <Spinner />
+        Fetching coverage tiles...
+      </div>
+    </div>
+
+    <div v-if="state.started && locsPerMin > 0" class="container">
+      <div class="p-1 text-sm text-gray-300">
+        {{ locsPerMin }} locs/min | {{ hitRate }}% hit
+      </div>
+      <div class="flex flex-wrap gap-x-3 gap-y-0.5 px-1 pb-1 text-xs text-gray-400">
+        <span>{{ reqPerSec }} req/s</span>
+        <span>{{ avgLatency }}ms latency</span>
+        <span>{{ rollingLocsPerMin }} locs/min (60s)</span>
+        <span>{{ errorRate }}% errors</span>
+        <span>ETA: {{ eta }}</span>
+        <span>{{ fps }} fps</span>
+      </div>
+    </div>
   </div>
 
   <div
@@ -707,28 +728,14 @@
         </Collapsible>
       </div>
 
-      <div class="flex items-center gap-3">
-        <Button
-          v-if="canBeStarted"
-          @click="handleClickStart"
-          :variant="state.started ? 'danger' : 'primary'"
-          title="Space bar/Enter"
-          >{{ state.started ? 'Pause' : 'Start' }}
-        </Button>
-        <div v-if="state.started && locsPerMin > 0" class="relative group">
-          <span class="text-sm text-gray-300 bg-gray-800 px-2 py-0.5 rounded cursor-default">
-            {{ locsPerMin }} locs/min | {{ hitRate }}% hit
-          </span>
-          <div class="hidden group-hover:block absolute top-full left-0 mt-1 bg-gray-800 border border-gray-700 rounded p-2 text-xs text-gray-300 whitespace-nowrap z-50 space-y-0.5">
-            <div>{{ reqPerSec }} req/s</div>
-            <div>{{ avgLatency }}ms avg latency</div>
-            <div>{{ rollingLocsPerMin }} locs/min (60s avg)</div>
-            <div>{{ errorRate }}% errors</div>
-            <div>ETA: {{ eta }}</div>
-            <div>{{ fps }} fps</div>
-          </div>
-        </div>
-      </div>
+      <Button
+        v-if="canBeStarted"
+        @click="handleClickStart"
+        :variant="state.started ? 'danger' : 'primary'"
+        class="w-full justify-center"
+        title="Space bar/Enter"
+        >{{ state.started ? 'Pause' : 'Start' }}
+      </Button>
     </div>
   </div>
 </template>
@@ -859,6 +866,7 @@ const errorRate = ref(0)
 const eta = ref('--')
 const fps = ref(0)
 const avgLatency = ref(0)
+const loadingTiles = ref(false)
 
 let _genStartTime = 0
 let _genStartLocs = 0
@@ -1038,10 +1046,12 @@ async function generate(polygon: Polygon) {
   let sampler: (() => LatLng | null) | null = null
 
   if (settings.onlyCheckBlueLines) {
+    loadingTiles.value = true
     if (settings.useBlueLineSampler) {
       sampler = await blueLineSampler(boundsNW, boundsSE)
     }
     detector = await blueLineDetector(boundsNW, boundsSE)
+    loadingTiles.value = false
   }
 
   while (polygon.found.length < polygon.nbNeeded) {
