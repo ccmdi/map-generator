@@ -721,6 +721,7 @@
           </span>
           <div class="hidden group-hover:block absolute top-full left-0 mt-1 bg-gray-800 border border-gray-700 rounded p-2 text-xs text-gray-300 whitespace-nowrap z-50 space-y-0.5">
             <div>{{ reqPerSec }} req/s</div>
+            <div>{{ avgLatency }}ms avg latency</div>
             <div>{{ rollingLocsPerMin }} locs/min (60s avg)</div>
             <div>{{ errorRate }}% errors</div>
             <div>ETA: {{ eta }}</div>
@@ -857,12 +858,14 @@ const rollingLocsPerMin = ref(0)
 const errorRate = ref(0)
 const eta = ref('--')
 const fps = ref(0)
+const avgLatency = ref(0)
 
 let _genStartTime = 0
 let _genStartLocs = 0
 let _apiCalls = 0
 let _apiHits = 0
 let _apiErrors = 0
+let _totalLatency = 0
 let _locsPerMinInterval: ReturnType<typeof setInterval> | null = null
 
 const _ROLLING_WINDOW = 60
@@ -896,6 +899,7 @@ function _startLocsPerMin() {
   _apiCalls = 0
   _apiHits = 0
   _apiErrors = 0
+  _totalLatency = 0
   locsPerMin.value = 0
   hitRate.value = 0
   reqPerSec.value = 0
@@ -903,6 +907,7 @@ function _startLocsPerMin() {
   errorRate.value = 0
   eta.value = '--'
   fps.value = 0
+  avgLatency.value = 0
   _rollingBuffer = new Float64Array(_ROLLING_WINDOW)
   _rollingIdx = 0
   _rollingFilled = 0
@@ -941,6 +946,9 @@ function _startLocsPerMin() {
     eta.value = rollingLocsPerMin.value > 0
       ? _formatEta(remaining / rollingLocsPerMin.value)
       : '--'
+
+    // Avg latency
+    avgLatency.value = _apiCalls > 0 ? Math.round(_totalLatency / _apiCalls) : 0
 
     // FPS
     fps.value = _frameCount
@@ -1132,7 +1140,9 @@ async function getNonBadcamRes(pano: string): Promise<StreetViewPanoramaData | n
 
 async function getLoc(loc: LatLng, polygon: Polygon) {
   _trackApiCall()
+  const _t0 = performance.now()
   return StreetViewProviders.getPanorama(settings.provider, getPanoramaRequest(loc, settings.rejectUnofficial), async (res, status) => {
+    _totalLatency += performance.now() - _t0
     if (status != google.maps.StreetViewStatus.OK || !res || !res.location) {
       if (status === google.maps.StreetViewStatus.UNKNOWN_ERROR) _trackApiError()
       return false
