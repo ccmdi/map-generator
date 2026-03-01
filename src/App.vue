@@ -715,9 +715,18 @@
           title="Space bar/Enter"
           >{{ state.started ? 'Pause' : 'Start' }}
         </Button>
-        <span v-if="state.started && locsPerMin > 0" class="text-sm text-gray-300 bg-gray-800 px-2 py-0.5 rounded">
-          {{ locsPerMin }} locs/min | {{ hitRate }}% hit
-        </span>
+        <div v-if="state.started && locsPerMin > 0" class="relative group">
+          <span class="text-sm text-gray-300 bg-gray-800 px-2 py-0.5 rounded cursor-default">
+            {{ locsPerMin }} locs/min | {{ hitRate }}% hit
+          </span>
+          <div class="hidden group-hover:block absolute top-full left-0 mt-1 bg-gray-800 border border-gray-700 rounded p-2 text-xs text-gray-300 whitespace-nowrap z-50 space-y-0.5">
+            <div>{{ reqPerSec }} req/s</div>
+            <div>{{ rollingLocsPerMin }} locs/min (60s avg)</div>
+            <div>{{ errorRate }}% errors</div>
+            <div>ETA: {{ eta }}</div>
+            <div>{{ fps }} fps</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -843,27 +852,99 @@ const totalLocs = computed(() =>
 
 const locsPerMin = ref(0)
 const hitRate = ref(0)
+const reqPerSec = ref(0)
+const rollingLocsPerMin = ref(0)
+const errorRate = ref(0)
+const eta = ref('--')
+const fps = ref(0)
+
 let _genStartTime = 0
 let _genStartLocs = 0
 let _apiCalls = 0
 let _apiHits = 0
+let _apiErrors = 0
 let _locsPerMinInterval: ReturnType<typeof setInterval> | null = null
+
+const _ROLLING_WINDOW = 60
+let _rollingBuffer = new Float64Array(_ROLLING_WINDOW)
+let _rollingIdx = 0
+let _rollingFilled = 0
+
+let _frameCount = 0
+let _fpsRafId: number | null = null
+function _fpsLoop() { _frameCount++; _fpsRafId = requestAnimationFrame(_fpsLoop) }
+
+const totalNeeded = computed(() =>
+  selected.value.reduce((sum, p) => sum + p.nbNeeded, 0),
+)
 
 function _trackApiCall() { _apiCalls++ }
 function _trackApiHit() { _apiHits++ }
+function _trackApiError() { _apiErrors++ }
+
+function _formatEta(minutes: number): string {
+  if (!isFinite(minutes) || minutes <= 0) return '--'
+  if (minutes < 1) return `${Math.round(minutes * 60)}s`
+  const m = Math.floor(minutes)
+  const s = Math.round((minutes - m) * 60)
+  return s > 0 ? `${m}m ${s}s` : `${m}m`
+}
 
 function _startLocsPerMin() {
   _genStartTime = Date.now()
   _genStartLocs = totalLocs.value
   _apiCalls = 0
   _apiHits = 0
+  _apiErrors = 0
   locsPerMin.value = 0
   hitRate.value = 0
+  reqPerSec.value = 0
+  rollingLocsPerMin.value = 0
+  errorRate.value = 0
+  eta.value = '--'
+  fps.value = 0
+  _rollingBuffer = new Float64Array(_ROLLING_WINDOW)
+  _rollingIdx = 0
+  _rollingFilled = 0
+  _frameCount = 0
+  _fpsRafId = requestAnimationFrame(_fpsLoop)
+
   _locsPerMinInterval = setInterval(() => {
-    const elapsedMin = (Date.now() - _genStartTime) / 60_000
+    const now = Date.now()
+    const elapsedSec = (now - _genStartTime) / 1000
+    const elapsedMin = elapsedSec / 60
     if (elapsedMin < 0.05) return
-    locsPerMin.value = Math.round((totalLocs.value - _genStartLocs) / elapsedMin * 10) / 10
+
+    const currentLocs = totalLocs.value - _genStartLocs
+
+    // Cumulative stats
+    locsPerMin.value = Math.round(currentLocs / elapsedMin * 10) / 10
     hitRate.value = _apiCalls > 0 ? Math.round((_apiHits / _apiCalls) * 100) : 0
+    reqPerSec.value = Math.round(_apiCalls / elapsedSec * 10) / 10
+    errorRate.value = _apiCalls > 0 ? Math.round((_apiErrors / _apiCalls) * 1000) / 10 : 0
+
+    // Rolling locs/min
+    const prevIdx = _rollingFilled >= _ROLLING_WINDOW
+      ? (_rollingIdx + 1) % _ROLLING_WINDOW
+      : 0
+    const prevLocs = _rollingBuffer[prevIdx]
+    _rollingBuffer[_rollingIdx] = currentLocs
+    _rollingIdx = (_rollingIdx + 1) % _ROLLING_WINDOW
+    _rollingFilled = Math.min(_rollingFilled + 1, _ROLLING_WINDOW)
+    const windowSec = Math.min(elapsedSec, _rollingFilled)
+    rollingLocsPerMin.value = windowSec > 0
+      ? Math.round((currentLocs - prevLocs) / windowSec * 60 * 10) / 10
+      : 0
+
+    // ETA based on rolling rate
+    const remaining = totalNeeded.value - totalLocs.value
+    eta.value = rollingLocsPerMin.value > 0
+      ? _formatEta(remaining / rollingLocsPerMin.value)
+      : '--'
+
+    // FPS
+    fps.value = _frameCount
+    _frameCount = 0
   }, 1000)
 }
 
@@ -871,6 +952,10 @@ function _stopLocsPerMin() {
   if (_locsPerMinInterval) {
     clearInterval(_locsPerMinInterval)
     _locsPerMinInterval = null
+  }
+  if (_fpsRafId !== null) {
+    cancelAnimationFrame(_fpsRafId)
+    _fpsRafId = null
   }
 }
 
@@ -1048,7 +1133,10 @@ async function getNonBadcamRes(pano: string): Promise<StreetViewPanoramaData | n
 async function getLoc(loc: LatLng, polygon: Polygon) {
   _trackApiCall()
   return StreetViewProviders.getPanorama(settings.provider, getPanoramaRequest(loc, settings.rejectUnofficial), async (res, status) => {
-    if (status != google.maps.StreetViewStatus.OK || !res || !res.location) return false
+    if (status != google.maps.StreetViewStatus.OK || !res || !res.location) {
+      if (status === google.maps.StreetViewStatus.UNKNOWN_ERROR) _trackApiError()
+      return false
+    }
 
     if (settings.searchInDescription.enabled) {
       const descriptionMatchesSearch = searchInDescription(
