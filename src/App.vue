@@ -1050,7 +1050,9 @@ async function generate(polygon: Polygon) {
     if (settings.useBlueLineSampler) {
       sampler = await blueLineSampler(boundsNW, boundsSE)
     }
-    detector = await blueLineDetector(boundsNW, boundsSE)
+    if (!sampler) {
+      detector = await blueLineDetector(boundsNW, boundsSE)
+    }
     loadingTiles.value = false
   }
 
